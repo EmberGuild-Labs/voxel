@@ -70,6 +70,28 @@ public struct Config: Codable {
     public var panicKey: HotkeyBinding
     public var resumeKey: HotkeyBinding
     public var profile: Profile
+    public var cover: CoverSettings
+
+    public init(panicKey: HotkeyBinding,
+                resumeKey: HotkeyBinding,
+                profile: Profile,
+                cover: CoverSettings = CoverSettings()) {
+        self.panicKey = panicKey
+        self.resumeKey = resumeKey
+        self.profile = profile
+        self.cover = cover
+    }
+
+    /// Decoded leniently so a config written by an older build -- one with no
+    /// `cover` key at all -- keeps working instead of failing to parse and
+    /// silently reverting the user to defaults.
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        panicKey = try container.decode(HotkeyBinding.self, forKey: .panicKey)
+        resumeKey = try container.decode(HotkeyBinding.self, forKey: .resumeKey)
+        profile = try container.decode(Profile.self, forKey: .profile)
+        cover = try container.decodeIfPresent(CoverSettings.self, forKey: .cover) ?? CoverSettings()
+    }
 
     /// Defaults are deliberately two-handed chords. Single-key ergonomics is an
     /// open question the P0 spike exists to answer -- see README.

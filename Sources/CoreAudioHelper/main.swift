@@ -16,6 +16,13 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         installSignalHandlers()
         registerHotkeys()
 
+        CoverLibrary.ensureDirectory()
+        concealer.armCover(config.cover)
+        if config.cover.enabled {
+            log(concealer.armedCoverName.map { "cover armed → \($0)" }
+                ?? "cover enabled but no usable image in \(CoverLibrary.directory.path)")
+        }
+
         log("ready — profile \"\(config.profile.name)\": "
             + "\(config.profile.conceal.count) to conceal, \(config.profile.reveal.count) to reveal")
         if !ConfigStore.exists {
@@ -43,13 +50,18 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
         // Re-read the profile on every press so editing config.json doesn't
         // require restarting the agent during the spike.
         config = ConfigStore.load()
-        let timing = concealer.panic(profile: config.profile)
-        log("PANIC  \(timing.summary)")
+        let cover = concealer.armedCoverName
+        let timing = concealer.panic(profile: config.profile, cover: config.cover)
+        let shown = (config.cover.enabled && cover != nil) ? "  cover=\(cover!)" : ""
+        log("PANIC  \(timing.summary)\(shown)")
     }
 
     private func handleResume() {
-        let timing = concealer.resume()
+        let timing = concealer.resume(cover: config.cover)
         log("RESUME \(timing.summary)")
+        if config.cover.enabled, let next = concealer.armedCoverName {
+            log("cover armed → \(next)")
+        }
     }
 
     /// If the agent dies while concealed, the machine is left muted and the
@@ -60,7 +72,7 @@ final class AgentDelegate: NSObject, NSApplicationDelegate {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
             source.setEventHandler { [weak self] in
                 if self?.concealer.isConcealed == true {
-                    self?.concealer.resume()
+                    self?.concealer.resume(cover: CoverSettings())
                     log("restored state before exit")
                 }
                 exit(0)

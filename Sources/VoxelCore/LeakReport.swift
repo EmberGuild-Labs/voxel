@@ -47,10 +47,31 @@ public enum LeakReport {
         if profile.conceal.isEmpty {
             leaks.append(Leak(
                 severity: .critical,
-                title: "No profile configured",
-                detail: "Voxel doesn't know what to hide, so panic would do nothing but mute.",
-                fix: "Arrange your setup and run `voxel capture`."))
-            return leaks
+                title: "Nothing in the conceal list",
+                detail: "Voxel doesn't know what to hide, so panic would mute and switch apps but "
+                      + "leave everything visible.",
+                fix: "Arrange your setup and run `voxel capture \(profile.name) --in 5`."))
+        }
+
+        // The single most consequential misconfiguration: a game is running and
+        // Voxel has no idea it should be hidden, so panic leaves it on screen.
+        let concealed = Set(profile.conceal)
+        let unlisted = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular }
+            .filter { !concealed.contains($0.bundleIdentifier ?? "") }
+            .compactMap { app -> (String, String)? in
+                guard let marker = ProfileCapture.gameMarker(for: app),
+                      let name = app.localizedName else { return nil }
+                return (name, marker)
+            }
+        for (name, marker) in unlisted {
+            leaks.append(Leak(
+                severity: .critical,
+                title: "\(name) is running but not in your conceal list",
+                detail: "It looks like a game (matched \"\(marker)\") and Voxel has not been told "
+                      + "to hide it, so a panic press would leave it sitting on screen.",
+                fix: "Run `voxel capture \(profile.name) --in 5` with it open, or add its bundle "
+                   + "identifier to \"conceal\" in the config file. `voxel apps` lists them."))
         }
 
         let coldDecoys = profile.reveal.filter {

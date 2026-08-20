@@ -35,8 +35,10 @@ resume     4.7 ms
 The headline finding: **the direct hide/activate path is fast enough**, and
 `mute` dominates it — 31ms of the 50ms is a CoreAudio property write round-
 tripping to Bluetooth headphones. On built-in output it should be far cheaper.
-This means "Instant Cover" (see [Ideas not built](#ideas-not-built)) is an
-optional refinement, not a requirement.
+
+Cover screenshots are built on top of that and cost **1.4ms**, verified against
+the window server's own on-screen list rather than trusting AppKit's occlusion
+reporting.
 
 ---
 
@@ -87,6 +89,7 @@ in as an explicit opt-in.
 ```bash
 ./scripts/build-app.sh                 # build the agent and the CLI
 ./build/voxel capture Gaming --in 5    # switch to your game during the countdown
+./build/voxel covers --open            # drop screenshots in, then: voxel covers
 ./build/voxel leaks                    # see what would still give you away
 open ./build/CoreAudioHelper.app       # start the agent
 ```
@@ -181,6 +184,40 @@ frames.
 This performs real actions — it will genuinely mute your audio and rearrange
 your windows — but it restores everything when the hold expires.
 
+### `voxel covers [name|number] [options]`
+
+Manages the cover screenshots and, crucially, **which one shows**.
+
+```bash
+voxel covers                      # list what you have, and the current rule
+voxel covers homework.png         # always show this one
+voxel covers 2                    # same, by position in the listing
+voxel covers --mode cycle         # advance to the next image on every panic
+voxel covers --mode random        # pick at random, never twice running
+voxel covers --dismiss 1500       # tear the image down after 1.5s
+voxel covers --hold               # keep it up until you press resume (default)
+voxel covers --off                # back to app-switching only
+voxel covers --open               # open the folder in Finder
+```
+
+Three ways to choose, and they're the whole answer to "I have a set, which one?":
+
+| Mode | Behaviour | Good for |
+|---|---|---|
+| `fixed` | Always the image you named. | One cover story you always use. |
+| `cycle` | Next image each panic, wrapping. | Rotating so the same person doesn't see the same screen twice. |
+| `random` | Random, never repeating back-to-back. | Same, without a predictable order. |
+
+The active image is resolved and decoded **before** the panic, not during it, so
+choosing between fifty screenshots costs the same as choosing between two.
+`cycle` position lives in memory and resets when the agent restarts.
+
+### `voxel apps`
+
+Lists every running app with its bundle identifier, so you can fill in `conceal`
+and `reveal` by hand without guessing. The quick single-app version is
+`osascript -e 'id of app "Steam"'`.
+
 ### `voxel config`
 
 Prints the config file path and its contents. Nothing clever; it saves you
@@ -224,6 +261,12 @@ General > Login Items.
     "conceal": ["com.valvesoftware.steam"],
     "reveal": ["com.google.Chrome", "com.apple.Notes"],
     "mute": true
+  },
+  "cover": {
+    "enabled": true,
+    "selection": "cycle",
+    "active": "homework.png",
+    "dismissAfterMilliseconds": 1500
   }
 }
 ```
@@ -235,8 +278,48 @@ General > Login Items.
 | `conceal` | Bundle identifiers to hide. Find one with `osascript -e 'id of app "Steam"'`. |
 | `reveal` | Bundle identifiers to bring forward. **`reveal[0]` ends up frontmost.** |
 | `mute` | Whether to silence and restore system output. |
+| `cover.selection` | `fixed`, `cycle`, or `random`. See [`voxel covers`](#voxel-covers-namenumber-options). |
+| `cover.active` | Filename in the covers folder. Only used by `fixed`. |
+| `cover.dismissAfterMilliseconds` | Omit to hold the image until resume. |
 
 Hotkey changes need an agent restart. Profile changes don't.
+
+---
+
+## Cover screenshots
+
+Instead of juggling real apps, Voxel can slam a **screenshot** over every display
+the instant you press panic.
+
+You supply the images. Screenshot your own cover story with ⌘⇧3, drop the files
+into `~/Library/Application Support/Voxel/covers/`, and run `voxel covers`.
+
+```bash
+voxel covers --open        # opens the folder
+voxel covers --mode cycle  # rotate through everything in it
+```
+
+This is faster and more reliable than moving windows around — the window is built
+and the image decoded ahead of time, so the panic itself is a single
+`orderFrontRegardless()` measured at **1.4ms**. It also sits above the Dock and
+the menu bar, which incidentally covers the Dock-icon leak.
+
+**Voxel never captures your screen.** It only draws pictures you already took.
+That is why a feature that would otherwise need Screen Recording permission needs
+none at all — the original design for this assumed Voxel would take the
+screenshot itself, and having you supply it removes the prompt entirely.
+
+Two teardown behaviours:
+
+- **Hold** (default) — the image stays until you press resume. Simple and
+  bulletproof, but static: it will not survive someone standing there for ten
+  seconds, moving the mouse, or asking you to scroll.
+- **Dismiss after N ms** (`--dismiss 1500`) — the image covers the switch and
+  then disappears, leaving your real cover-story apps on screen. Best of both,
+  but only convincing if the screenshot actually matches what's underneath.
+
+Clicks do **not** pass through to whatever is behind the cover. A stray click
+landing in the game would be worse than no cover at all.
 
 ---
 
@@ -244,8 +327,11 @@ Hotkey changes need an agent restart. Profile changes don't.
 
 Ordered by what gives you away soonest, not by what's easiest:
 
-1. **Mute** — synchronously, first. Sound reaches the hallway before sight
-   reaches the doorway. It's the only tell with a head start on the person.
+0. **Cover** — if a screenshot is armed, put it up. Already decoded and already
+   laid out, so this is one `orderFront`: the screen changes in a single frame,
+   before anything slower gets a chance to be visible. ~1.4ms.
+1. **Mute** — synchronously. Sound reaches the hallway before sight reaches the
+   doorway. It's the only tell with a head start on the person.
 2. **Hide** the concealed apps. `hide()` is animation-free and instant.
 3. **Reveal** the cover story, back-to-front so the intended app lands on top.
 
@@ -266,6 +352,7 @@ permission-free:
 
 | Check | Why it matters |
 |---|---|
+| **Game running but not in `conceal`** | The one misconfiguration that makes panic useless: Voxel doesn't know it should hide the thing you're hiding. |
 | Fullscreen / off-Space game | Half-second Space-switch animation macOS won't let us suppress. The worst failure mode. |
 | Decoy app not running | Panic would have to cold-launch it — seconds, not milliseconds, and a launching app looks nothing like one you were using. |
 | Built-in speakers at volume | Mute is instant, but speakers cost you the head start. |
@@ -290,6 +377,7 @@ Sources/
     Config.swift          hotkey bindings, profiles, JSON store
     AudioController.swift CoreAudio mute/restore with a 3-strategy fallback
     Concealer.swift       the panic sequence, its inverse, and phase timing
+    Cover.swift           screenshot overlay windows and the selection rule
     HotkeyService.swift   Carbon global hotkeys
     ProfileCapture.swift  snapshot running apps → cover story
     LeakReport.swift      permission-free audit
@@ -347,11 +435,6 @@ wrong — see below.
 
 Deliberately deferred, in rough priority order:
 
-- **Instant Cover** — screenshot the decoy at arm time; on panic slam a
-  borderless window at `.screenSaver` level showing it (one frame, guaranteed),
-  do the real work behind it, dismiss. Makes the switch frame-perfect regardless
-  of what's slow underneath. Costs a Screen Recording prompt, so opt-in. P0
-  timings suggest it isn't needed.
 - **Auto-arm** — launching any app in the conceal set arms Voxel silently, so
   the config UI is opened once and never again.
 - **Conceal on screen share** — detect Zoom/Teams/OBS starting a capture and
@@ -361,6 +444,9 @@ Deliberately deferred, in rough priority order:
 - **Deeper capture** — window titles and open documents, for a decoy that
   restores exactly. Needs Screen Recording (titles) and Automation (browser
   tabs).
+- **Live-looking covers** — nudge the decoy on reveal (scroll a line, move the
+  caret) so a held screenshot doesn't read as frozen if someone lingers.
+- **Per-display covers** — right now every display gets the same image.
 - **Session budget** — a play timer, which is the honest framing for the
   landing page as well as a genuinely useful feature.
 - **Presence killing** — toggle Discord Rich Presence and Steam status

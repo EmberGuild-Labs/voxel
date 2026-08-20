@@ -41,6 +41,7 @@ public struct ConcealState {
     public var hidden: [String] = []
     public var previousFront: String?
     public var audio: AudioSnapshot?
+    public var showedCover = false
     public var startedAt = Date()
 }
 
@@ -49,12 +50,29 @@ public final class Concealer {
     public private(set) var state: ConcealState?
     public var isConcealed: Bool { state != nil }
 
+    private let library = CoverLibrary()
+    private let presenter = CoverPresenter()
+
+    /// Which image the next panic will show, if any.
+    public var armedCoverName: String? { presenter.preparedImageName }
+
+    /// Cover windows the window server reports as actually on screen.
+    public var visibleCoverCount: Int { presenter.visibleWindowCount }
+
+
     public init() {}
+
+    /// Decides on and decodes the next cover image ahead of time, so that
+    /// neither choosing nor decoding lands in the panic's latency budget.
+    /// Call at startup and after every resume.
+    public func armCover(_ settings: CoverSettings) {
+        presenter.prepare(imageURL: library.resolveNext(settings))
+    }
 
     // MARK: - Panic
 
     @discardableResult
-    public func panic(profile: Profile) -> TimingReport {
+    public func panic(profile: Profile, cover: CoverSettings = CoverSettings()) -> TimingReport {
         var timing = TimingReport()
         guard state == nil else {
             timing.mark("already concealed")
@@ -64,8 +82,17 @@ public final class Concealer {
         var newState = ConcealState()
         newState.previousFront = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
 
-        // 1. Audio first, and synchronously. Sound reaches the hallway before
-        //    sight reaches the doorway.
+        // 0. The cover image, if armed. Already decoded and already laid out, so
+        //    this is one `orderFront` -- the screen changes in a single frame,
+        //    before anything slower gets a chance to be visible.
+        if cover.enabled, presenter.isPrepared {
+            presenter.show(dismissAfterMilliseconds: cover.dismissAfterMilliseconds)
+            newState.showedCover = true
+        }
+        timing.mark("cover")
+
+        // 1. Audio, synchronously. Sound reaches the hallway before sight
+        //    reaches the doorway.
         if profile.mute {
             newState.audio = AudioController.silence()
         }
@@ -94,12 +121,17 @@ public final class Concealer {
     // MARK: - Resume
 
     @discardableResult
-    public func resume() -> TimingReport {
+    public func resume(cover: CoverSettings = CoverSettings()) -> TimingReport {
         var timing = TimingReport()
         guard let current = state else {
             timing.mark("not concealed")
             return timing
         }
+
+        if current.showedCover {
+            presenter.hide()
+        }
+        timing.mark("uncover")
 
         for bundleID in current.hidden {
             for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
@@ -119,6 +151,9 @@ public final class Concealer {
         timing.mark("unmute")
 
         state = nil
+
+        // Choose and decode the next image now, while nothing is time-critical.
+        armCover(cover)
         return timing
     }
 

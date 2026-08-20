@@ -42,6 +42,7 @@ public enum ProfileCapture {
     private static let gameMarkers = [
         "steam", "valvesoftware", "epicgames", "epic games", "blizzard", "battle.net",
         "minecraft", "riotgames", "leagueoflegends", "roblox", "ubisoft", "origin",
+        "innersloth", "mojang", "nexon", "wargaming", "playstation", "faceit",
         "ea app", "gog.com", "galaxy", "crossover", "whisky", "porting kit", "playonmac",
         "unity.", "unrealengine", "/applications/games/",
     ]
@@ -73,6 +74,14 @@ public enum ProfileCapture {
             return id == "com.apple.finder" || id == "com.apple.systemuiserver"
         }
         return false
+    }
+
+    /// Returns the marker that makes this app look like a game, or nil.
+    /// Shared with the leak report so both agree on what counts as a game.
+    public static func gameMarker(for app: NSRunningApplication) -> String? {
+        guard let bundleID = app.bundleIdentifier else { return nil }
+        let haystack = bundleID.lowercased() + " " + (app.bundleURL?.path ?? "").lowercased()
+        return gameMarkers.first { haystack.contains($0) }
     }
 
     public static func capture(name: String, existing: Config = ConfigStore.load()) -> CaptureResult {

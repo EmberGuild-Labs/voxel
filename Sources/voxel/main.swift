@@ -158,9 +158,31 @@ func runDryRun(hold: Double) {
     print("  " + Style.dim("Concealing for \(String(format: "%.1f", hold))s, then restoring."))
     print("")
 
-    let panicTiming = concealer.panic(profile: config.profile)
-    Thread.sleep(forTimeInterval: hold)
-    let resumeTiming = concealer.resume()
+    // A cover window needs a run loop to draw and an accessory activation
+    // policy to come forward. A plain CLI process has neither by default, and
+    // without finishLaunching() AppKit never maps the window at all.
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    application.finishLaunching()
+    concealer.armCover(config.cover)
+    if config.cover.enabled {
+        if let name = concealer.armedCoverName {
+            print("  " + Style.dim("cover: \(name)"))
+        } else {
+            print("  " + Style.yellow("cover enabled but no usable image found"))
+        }
+    }
+
+    let panicTiming = concealer.panic(profile: config.profile, cover: config.cover)
+    RunLoop.current.run(until: Date().addingTimeInterval(min(hold, 0.3)))
+    let onScreen = concealer.visibleCoverCount
+    if config.cover.enabled {
+        let ok = onScreen == NSScreen.screens.count
+        let text = "cover on screen: \(onScreen)/\(NSScreen.screens.count) displays"
+        print("  " + (ok ? Style.green(text) : Style.yellow(text)))
+    }
+    RunLoop.current.run(until: Date().addingTimeInterval(max(0, hold - 0.3)))
+    let resumeTiming = concealer.resume(cover: config.cover)
 
     for (label, timing) in [("panic ", panicTiming), ("resume", resumeTiming)] {
         let total = timing.total
@@ -173,6 +195,145 @@ func runDryRun(hold: Double) {
     }
     print("")
     print("  " + Style.dim("<150ms is the target. Screen-record at 60fps for the real number."))
+    print("")
+}
+
+func runCovers(arguments: [String]) {
+    CoverLibrary.ensureDirectory()
+    var config = ConfigStore.load()
+    let images = CoverLibrary.available()
+
+    var changed = false
+    var index = 1
+    while index < arguments.count {
+        let argument = arguments[index]
+        switch argument {
+        case "--mode":
+            if index + 1 < arguments.count,
+               let mode = CoverSelection(rawValue: arguments[index + 1]) {
+                config.cover.selection = mode
+                config.cover.enabled = true
+                changed = true
+                index += 2
+            } else {
+                print("  " + Style.red("--mode needs one of: fixed, cycle, random"))
+                return
+            }
+        case "--dismiss":
+            if index + 1 < arguments.count, let milliseconds = Int(arguments[index + 1]) {
+                config.cover.dismissAfterMilliseconds = max(100, milliseconds)
+                changed = true
+                index += 2
+            } else {
+                print("  " + Style.red("--dismiss needs a number of milliseconds"))
+                return
+            }
+        case "--hold":
+            config.cover.dismissAfterMilliseconds = nil
+            changed = true
+            index += 1
+        case "--off":
+            config.cover.enabled = false
+            changed = true
+            index += 1
+        case "--open":
+            NSWorkspace.shared.open(CoverLibrary.directory)
+            index += 1
+        default:
+            // A name, or a 1-based index from the listing.
+            let match: URL?
+            if let number = Int(argument), number >= 1, number <= images.count {
+                match = images[number - 1]
+            } else {
+                match = images.first {
+                    $0.lastPathComponent == argument
+                        || $0.deletingPathExtension().lastPathComponent == argument
+                }
+            }
+            guard let match else {
+                print("  " + Style.red("No cover named \"\(argument)\""))
+                return
+            }
+            config.cover.active = match.lastPathComponent
+            config.cover.selection = .fixed
+            config.cover.enabled = true
+            changed = true
+            index += 1
+        }
+    }
+
+    if changed {
+        do { try ConfigStore.save(config) }
+        catch { print("  " + Style.red("Failed to save: \(error.localizedDescription)")); return }
+    }
+
+    print("")
+    print(Style.bold("Covers") + Style.dim("  ·  \(CoverLibrary.directory.path)"))
+    print("")
+
+    if images.isEmpty {
+        print("  " + Style.dim("No images yet."))
+        print("")
+        print("  Screenshot the cover story you want (⌘⇧4, or ⌘⇧3 for the whole screen),")
+        print("  then drop the files in that folder. Voxel never captures your screen")
+        print("  itself — that's why this costs no permissions.")
+        print("")
+        print("  " + Style.cyan("voxel covers --open") + Style.dim("   opens the folder"))
+        print("")
+        return
+    }
+
+    for (position, image) in images.enumerated() {
+        let name = image.lastPathComponent
+        let isActive = config.cover.enabled
+            && config.cover.selection == .fixed
+            && config.cover.active == name
+        let marker = isActive ? Style.green(" ← active") : ""
+        let size = (try? image.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        let dimensions = NSImage(contentsOf: image).map {
+            "\(Int($0.size.width))×\(Int($0.size.height))"
+        } ?? "unreadable"
+        print("  \(Style.dim(String(format: "%2d.", position + 1))) \(name)\(marker)")
+        print("      \(Style.dim("\(dimensions), \(size / 1024) KB"))")
+    }
+
+    print("")
+    let state: String
+    if !config.cover.enabled {
+        state = Style.dim("off")
+    } else {
+        switch config.cover.selection {
+        case .fixed: state = Style.green("fixed") + " → \(config.cover.active ?? images[0].lastPathComponent)"
+        case .cycle: state = Style.green("cycle") + Style.dim(" — next image on every panic")
+        case .random: state = Style.green("random") + Style.dim(" — never the same one twice running")
+        }
+    }
+    print("  mode:    \(state)")
+
+    let teardown = config.cover.dismissAfterMilliseconds
+        .map { "after \($0)ms, then the real apps show through" } ?? "held until you press resume"
+    print("  \(Style.dim("teardown: \(teardown)"))")
+    print("")
+    print("  " + Style.dim("voxel covers <name|number>   use one specific image"))
+    print("  " + Style.dim("voxel covers --mode cycle    rotate through them"))
+    print("  " + Style.dim("voxel covers --off           back to app-switching only"))
+    print("")
+}
+
+func runApps() {
+    let apps = NSWorkspace.shared.runningApplications
+        .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != nil }
+        .sorted { ($0.localizedName ?? "").localizedCaseInsensitiveCompare($1.localizedName ?? "") == .orderedAscending }
+
+    print("")
+    print(Style.bold("Running apps") + Style.dim("  ·  bundle IDs for conceal / reveal"))
+    print("")
+    for app in apps {
+        let name = (app.localizedName ?? "?").padding(toLength: 26, withPad: " ", startingAt: 0)
+        print("  \(name)\(Style.dim(app.bundleIdentifier ?? ""))")
+    }
+    print("")
+    print("  " + Style.dim("Paste these into conceal / reveal in the config file."))
     print("")
 }
 
@@ -198,6 +359,12 @@ func runHelp() {
       \(Style.cyan("leaks"))            Audit what would still give you away after a panic
       \(Style.cyan("dry-run"))          Run panic, hold, then resume — with per-phase timings
                        \(Style.dim("--hold <seconds>  how long to stay concealed (default 2)"))
+      \(Style.cyan("covers"))           List cover screenshots and choose which one shows
+                       \(Style.dim("<name|number>   use one specific image"))
+                       \(Style.dim("--mode <fixed|cycle|random>   how to pick between them"))
+                       \(Style.dim("--dismiss <ms> | --hold       when to tear it down"))
+                       \(Style.dim("--off | --open                disable / open the folder"))
+      \(Style.cyan("apps"))             List running apps with their bundle IDs
       \(Style.cyan("config"))           Print the config file path and contents
       \(Style.cyan("help"))             This
 
@@ -234,6 +401,10 @@ case "dry-run", "dryrun":
         hold = max(0.2, min(seconds, 30))
     }
     runDryRun(hold: hold)
+case "covers", "cover":
+    runCovers(arguments: arguments)
+case "apps":
+    runApps()
 case "config":
     runConfig()
 case "help", "--help", "-h", nil:
